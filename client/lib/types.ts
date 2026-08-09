@@ -33,6 +33,11 @@ export interface Settings {
   announcementsEnabled: boolean;
 }
 
+export interface StudyPlanItem {
+  day: string;
+  task: string;
+}
+
 export interface User {
   id: string;
   email: string;
