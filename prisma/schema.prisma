@@ -1,0 +1,214 @@
+// ClassNotify AI — Prisma schema
+// Run `npx prisma migrate dev --name init` after setting DATABASE_URL
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Users & Auth
+// ---------------------------------------------------------------------------
+
+model User {
+  id                String    @id @default(cuid())
+  googleId          String    @unique
+  email             String    @unique
+  name              String?
+  avatarUrl         String?
+
+  // Encrypted (AES-256-GCM) OAuth tokens — never store plaintext
+  accessTokenEnc    String
+  refreshTokenEnc   String
+  tokenExpiresAt    DateTime
+
+  timezone          String    @default("UTC")
+
+  telegramUser      TelegramUser?
+  settings          Settings?
+  courses           CourseEnrollment[]
+  assignments       Assignment[]
+  reminderSchedules ReminderSchedule[]
+  reminderHistory   ReminderHistory[]
+  notificationLogs  NotificationLog[]
+
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  @@index([email])
+}
+
+model TelegramUser {
+  id           String   @id @default(cuid())
+  userId       String   @unique
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chatId       String   @unique
+  username     String?
+  linkedAt     DateTime @default(now())
+  isActive     Boolean  @default(true)
+}
+
+// Short-lived one-time code shown on the dashboard; the user sends it to the
+// bot via `/register <code>` to link their Telegram account to their User row.
+model LinkCode {
+  id        String   @id @default(cuid())
+  code      String   @unique
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model Settings {
+  id                      String   @id @default(cuid())
+  userId                  String   @unique
+  user                    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  dailySummaryEnabled     Boolean  @default(true)
+  dailySummaryTime        String   @default("07:00") // HH:mm, interpreted in user.timezone
+
+  weeklySummaryEnabled    Boolean  @default(true)
+  weeklySummaryDay        Int      @default(0) // 0 = Sunday
+
+  smartRemindersEnabled   Boolean  @default(true)
+  announcementsEnabled    Boolean  @default(true)
+
+  updatedAt               DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
+// Classroom domain
+// ---------------------------------------------------------------------------
+
+model Course {
+  id                 String   @id @default(cuid())
+  googleCourseId     String   @unique
+  name               String
+  section            String?
+  teacherName        String?
+  courseLink         String?
+
+  enrollments        CourseEnrollment[]
+  assignments        Assignment[]
+  announcements      Announcement[]
+
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+model CourseEnrollment {
+  id       String @id @default(cuid())
+  userId   String
+  user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  courseId String
+  course   Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, courseId])
+}
+
+enum SubmissionState {
+  NEW
+  CREATED
+  TURNED_IN
+  RETURNED
+  RECLAIMED_BY_STUDENT
+}
+
+model Assignment {
+  id                  String           @id @default(cuid())
+  googleCourseWorkId  String
+  courseId            String
+  course              Course           @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  userId              String
+  user                User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  title               String
+  description         String?
+  teacherName         String?
+  dueAt                DateTime?
+  creationTime        DateTime
+  classroomLink       String
+
+  submissionState     SubmissionState  @default(NEW)
+  completedAt         DateTime?
+
+  // AI-assist fields (nice-to-have)
+  aiEstimatedMinutes  Int?
+  aiDifficulty        String?
+  aiStudyPlan         Json?
+
+  reminderSchedule    ReminderSchedule?
+  reminderHistory     ReminderHistory[]
+  notificationLogs    NotificationLog[]
+
+  createdAt           DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@unique([userId, googleCourseWorkId])
+  @@index([userId, submissionState])
+  @@index([dueAt])
+}
+
+model Announcement {
+  id               String   @id @default(cuid())
+  googleAnnounceId String   @unique
+  courseId         String
+  course           Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  text             String
+  creationTime     DateTime
+
+  createdAt        DateTime @default(now())
+}
+
+// ---------------------------------------------------------------------------
+// Reminder engine
+// ---------------------------------------------------------------------------
+
+model ReminderSchedule {
+  id             String     @id @default(cuid())
+  assignmentId   String     @unique
+  assignment     Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  active         Boolean    @default(true)
+  intervalMins   Int        // current cadence, recomputed as due date approaches
+  nextFireAt     DateTime   // persisted so the schedule survives restarts
+  lastFiredAt    DateTime?
+
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+
+  @@index([active, nextFireAt])
+}
+
+model ReminderHistory {
+  id           String     @id @default(cuid())
+  assignmentId String
+  assignment   Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  userId       String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sentAt       DateTime   @default(now())
+  kind         String     // e.g. "reminder", "overdue", "update", "submitted"
+}
+
+model NotificationLog {
+  id           String      @id @default(cuid())
+  userId       String
+  user         User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  assignmentId String?
+  assignment   Assignment? @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+
+  channel      String      @default("telegram")
+  type         String      // new_assignment | reminder | updated | submitted | daily_summary | weekly_summary
+  payload      Json?
+  success      Boolean     @default(true)
+  error        String?
+
+  sentAt       DateTime    @default(now())
+
+  @@index([userId, type])
+}
